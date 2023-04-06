@@ -1,2 +1,0 @@
-class TooManyMessagesError < StandardError
-end
