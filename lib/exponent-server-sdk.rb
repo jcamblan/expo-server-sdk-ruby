@@ -1,5 +1,4 @@
 require 'exponent-server-sdk/version'
-require 'exponent-server-sdk/too_many_messages_error'
 require 'typhoeus'
 require 'json'
 
@@ -44,18 +43,8 @@ module Exponent
         @gzip             = args[:gzip] == true
       end
 
-      # returns a string response with parsed success json or error
-      # @deprecated
-      def publish(messages)
-        warn '[DEPRECATION] `publish` is deprecated. Please use `send_messages` instead.'
-        @response_handler.handle(push_notifications(messages))
-      end
-
       # returns response handler that provides access to errors? and other response inspection methods
       def send_messages(messages, **args)
-        # https://docs.expo.io/versions/latest/guides/push-notifications/#message-format
-        raise TooManyMessagesError, 'Only 100 message objects at a time allowed.' if messages.length > 100
-
         response = push_notifications(messages)
 
         # each call to send_messages will return a new instance of ResponseHandler
@@ -124,7 +113,7 @@ module Exponent
 
         case response.code.to_s
         when /(^4|^5)/
-          raise @error_builder.parse_response(response)
+          raise @error_builder.parse_response(body)
         else
           sort_results
         end
@@ -132,18 +121,6 @@ module Exponent
 
       def errors?
         @errors.any?
-      end
-
-      # @deprecated
-      def handle(response)
-        warn '[DEPRECATION] `handle` is deprecated. Please use `process_response` instead.'
-        @response = response
-        case response.code.to_s
-        when /(^4|^5)/
-          raise build_error_from_failure
-        else
-          extract_data
-        end
       end
 
       private
@@ -200,49 +177,18 @@ module Exponent
         # Prevent nil errors in old version of ruby when using fetch
         @body = {}
       end
-
-      ##### DEPRECATED METHODS #####
-
-      # @deprecated
-      def build_error_from_failure
-        @error_builder.build_from_erroneous(body)
-      end
-
-      # @deprecated
-      def extract_data
-        data = body.fetch('data')
-        if data.is_a? Hash
-          validate_status(data.fetch('status'), body)
-          data
-        elsif data.is_a? Array
-          data.map do |receipt|
-            validate_status(receipt.fetch('status'), body)
-            receipt
-          end
-        else
-          {}
-        end
-      end
-
-      # @deprecated
-      def validate_status(status, response)
-        raise build_error_from_success(response) unless status == 'ok'
-      end
-
-      # @deprecated
-      def build_error_from_success(response)
-        @error_builder.build_from_successful(response)
-      end
     end
 
     class ErrorBuilder
       def parse_response(response)
         with_error_handling(response) do
-          error      = response.fetch('errors')
-          error_name = error.fetch('code')
+          error      = [response.fetch('errors')].flatten.first
+          error_name = error.fetch('code').split("_").map(&:capitalize).join
           message    = error.fetch('message')
 
-          get_error_class(error_name).new(message)
+          get_error_class(error_name).new(message).tap do |err|
+            err.response_body = response
+          end
         end
       end
 
@@ -280,34 +226,26 @@ module Exponent
       end
 
       def unknown_error_format(response)
-        Exponent::Push::UnknownError.new("Unknown error format: #{response.respond_to?(:body) ? response.body : response}")
-      end
-
-      ##### DEPRECATED METHODS #####
-
-      # @deprecated
-      def from_erroneous_response(response)
-        error      = response.fetch('errors').first
-        error_name = error.fetch('code')
-        message    = error.fetch('message')
-
-        get_error_class(error_name).new(message)
-      end
-
-      # @deprecated
-      def from_successful_response(response)
-        delivery_result = response.fetch('data').first
-        message         = delivery_result.fetch('message')
-        get_error_class(delivery_result.fetch('details').fetch('error')).new(message)
+        Exponent::Push::UnknownError.new("Unknown error format").tap do |err|
+          err.response_body = response
+        end
       end
     end
 
-    Error = Class.new(StandardError)
+    Error = Class.new(StandardError) do
+      attr_accessor :response_body
+    end
 
     def self.error_names
-      %w[DeviceNotRegistered MessageTooBig
-         MessageRateExceeded InvalidCredentials
-         Unknown]
+      %w[
+        DeviceNotRegistered
+        MessageTooBig
+        MessageRateExceeded
+        InvalidCredentials
+        Unknown
+        PushTooManyExperienceIds
+        PushTooManyNotifications
+      ]
     end
 
     error_names.each do |error_name|
